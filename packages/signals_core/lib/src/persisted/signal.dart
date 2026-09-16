@@ -124,11 +124,13 @@ mixin PersistedSignalMixin<T> on Signal<T> {
   bool loaded = false;
 
   /// Initializes the signal by loading the value from the store.
+  ///
+  /// In-flight hydration still settles after disposal without publishing.
   Future<void> init() async {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     try {
-      super.value = await load();
-    } catch (e) {
-      rethrow;
+      final result = await load();
+      if (!disposed) super.value = result;
     } finally {
       loaded = true;
     }
@@ -136,7 +138,7 @@ mixin PersistedSignalMixin<T> on Signal<T> {
 
   @override
   T get value {
-    if (!loaded) init().ignore();
+    if (!loaded && !disposed) init().ignore();
     return super.value;
   }
 
@@ -149,7 +151,7 @@ mixin PersistedSignalMixin<T> on Signal<T> {
   /// Loads the value from the store.
   Future<T> load() async {
     final val = await store.getItem(key);
-    if (val == null) return value;
+    if (val == null) return super.value;
     return decode(val);
   }
 

@@ -87,7 +87,11 @@ class MutationSignal<A, T> extends Signal<MutationState<T>> {
   /// of *this* invocation (or throws its error) even when a newer mutation
   /// supersedes it; only the latest invocation updates the shared signal state
   /// and [future].
+  ///
+  /// Disposal prevents state updates but preserves in-flight results and the
+  /// shared [future]. Starting a mutation after disposal is an error.
   Future<T> mutateAsync(A arg) async {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     final token = Object();
     _token = token;
     _variables = arg;
@@ -98,7 +102,7 @@ class MutationSignal<A, T> extends Signal<MutationState<T>> {
       final result = await _mutator(arg);
       if (identical(_token, token)) {
         batch(() {
-          value = MutationSuccess<T>(result);
+          if (!disposed) value = MutationSuccess<T>(result);
           if (!completer.isCompleted) completer.complete(result);
         });
       }
@@ -106,7 +110,7 @@ class MutationSignal<A, T> extends Signal<MutationState<T>> {
     } catch (error, stackTrace) {
       if (identical(_token, token)) {
         batch(() {
-          value = MutationError<T>(error, stackTrace);
+          if (!disposed) value = MutationError<T>(error, stackTrace);
           if (!completer.isCompleted) {
             completer.completeError(error, stackTrace);
             // swallow if [future] is unawaited
@@ -126,17 +130,22 @@ class MutationSignal<A, T> extends Signal<MutationState<T>> {
   /// Optional [onSuccess]/[onError] callbacks fire when *this* invocation
   /// settles, mirroring the per-call result of [mutateAsync]: a stale
   /// (superseded or reset) invocation still invokes its own callback even though
-  /// it no longer updates the signal state. Await [mutateAsync] instead when you
-  /// need the result inline; it does not take these callbacks.
+  /// it no longer updates the signal state. Disposal suppresses both callbacks.
+  /// Await [mutateAsync] instead when you need the result inline; it does not
+  /// take these callbacks. Calling [mutate] after disposal throws synchronously.
   void mutate(
     A arg, {
     void Function(T data)? onSuccess,
     void Function(Object error, StackTrace stackTrace)? onError,
   }) {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     mutateAsync(arg).then(
-      (data) => onSuccess?.call(data),
-      onError: (Object error, StackTrace stackTrace) =>
-          onError?.call(error, stackTrace),
+      (data) {
+        if (!disposed) onSuccess?.call(data);
+      },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!disposed) onError?.call(error, stackTrace);
+      },
     );
   }
 
@@ -163,6 +172,7 @@ class MutationSignal<A, T> extends Signal<MutationState<T>> {
   /// A [future] obtained before the reset is settled with a [StateError] so it
   /// never hangs, and a fresh [future] is prepared for the next mutation.
   void reset() {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     _token = null;
     _variables = null;
     if (!_completer.isCompleted) {

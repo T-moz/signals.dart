@@ -6,6 +6,131 @@ import 'package:test/test.dart';
 void main() {
   SignalsObserver.instance = null;
   group('MutationSignal', () {
+    test('in-flight result and shared future survive disposal', () async {
+      final operation = Completer<int>();
+      final m = mutationSignal<int, int>((_) => operation.future);
+      final invocation = m.mutateAsync(1);
+      final pending = m.future;
+      final state = m.peek();
+      m.dispose();
+      operation.complete(42);
+      expect(await invocation, 42);
+      expect(await pending, 42);
+      expect(m.peek(), same(state));
+    });
+
+    test('in-flight and shared errors preserve their identity after disposal',
+        () async {
+      final operation = Completer<int>();
+      final error = StateError('save failed');
+      final stack = StackTrace.current;
+      final m = mutationSignal<int, int>((_) => operation.future);
+      Future<void> expectError(Future<int> future) => future.then<void>(
+            (_) => fail('Expected the original error'),
+            onError: (Object caught, StackTrace trace) {
+              expect(caught, same(error));
+              expect(trace, same(stack));
+            },
+          );
+      final invocation = expectError(m.mutateAsync(1));
+      final pending = expectError(m.future);
+      final state = m.peek();
+      m.dispose();
+      operation.completeError(error, stack);
+      await Future.wait([invocation, pending]);
+      expect(m.peek(), same(state));
+    });
+
+    test('mutate suppresses success and error callbacks after disposal',
+        () async {
+      for (final fails in [false, true]) {
+        final operation = Completer<int>();
+        final m = mutationSignal<int, int>((_) => operation.future);
+        var callbacks = 0;
+        m.mutate(
+          1,
+          onSuccess: (_) => callbacks++,
+          onError: (_, __) => callbacks++,
+        );
+        final state = m.peek();
+        m.dispose();
+        if (fails) {
+          operation.completeError(StateError('save failed'));
+        } else {
+          operation.complete(42);
+        }
+        await Future<void>.delayed(Duration.zero);
+        expect(callbacks, 0);
+        expect(m.peek(), same(state));
+      }
+    });
+
+    test('rejected work and reset leave existing awaiters intact', () async {
+      final operation = Completer<int>();
+      var calls = 0;
+      final m = mutationSignal<int, int>((_) {
+        calls++;
+        return operation.future;
+      });
+      final invocation = m.mutateAsync(1);
+      final pending = m.future;
+      m.dispose();
+      await expectLater(
+        m.mutateAsync(2),
+        throwsA(isA<SignalsWriteAfterDisposeError>()),
+      );
+      expect(() => m.mutate(3), throwsA(isA<SignalsWriteAfterDisposeError>()));
+      expect(m.retry, throwsA(isA<SignalsWriteAfterDisposeError>()));
+      expect(m.reset, throwsA(isA<SignalsWriteAfterDisposeError>()));
+      expect(
+        () => m.value = MutationSuccess<int>(99),
+        throwsA(isA<SignalsWriteAfterDisposeError>()),
+      );
+      operation.complete(42);
+      expect(await invocation, 42);
+      expect(await pending, 42);
+      expect(m.variables, 1);
+      expect(calls, 1);
+    });
+
+    test('disposal preserves latest-run selection and per-invocation results',
+        () async {
+      final first = Completer<int>();
+      final latest = Completer<int>();
+      final m = mutationSignal<int, int>(
+        (arg) => arg == 1 ? first.future : latest.future,
+      );
+      final oldInvocation = m.mutateAsync(1);
+      var settled = false;
+      final pending = m.future.then((value) {
+        settled = true;
+        return value;
+      });
+      final newInvocation = m.mutateAsync(2);
+      m.dispose();
+      first.complete(1);
+      expect(await oldInvocation, 1);
+      expect(settled, false);
+      latest.complete(2);
+      expect(await newInvocation, 2);
+      expect(await pending, 2);
+    });
+
+    test('reset still settles shared waiters and permits the detached callback',
+        () async {
+      final operation = Completer<int>();
+      final m = mutationSignal<int, int>((_) => operation.future);
+      final callback = Completer<int>();
+      m.mutate(1, onSuccess: callback.complete);
+      final pending = expectLater(m.future, throwsA(isA<StateError>()));
+      m.reset();
+      await pending;
+      operation.complete(42);
+      expect(await callback.future, 42);
+      expect(m.peek(), isA<MutationIdle<int>>());
+      m.dispose();
+    });
+
     test('starts idle before being run', () {
       final m = mutationSignal<int, int>((arg) async => arg * 2);
       expect(m.peek(), isA<MutationIdle<int>>());

@@ -5,6 +5,9 @@
 - **`mutationSignalContainer`**: A keyed container factory for `MutationSignal`s (mirrors `futureSignalContainer`/`streamSignalContainer`), creating and optionally caching one mutation per key.
 - **Mutation extensions**: `Future<T> Function(A).toMutationSignal()` converts a mutation function into a `MutationSignal` (mirrors `Future.toFutureSignal()`), and `Signal<MutationState<T>>.selectData<R>(...)` derives a `Computed<MutationState<R>>` mapping the success value while preserving idle/pending/error (mirrors `AsyncSignalState.selectData`).
 
+### Fixes
+- In-flight future, mutation, and persisted hydration operations now settle after disposal without publishing to disposed signals. Mutation callbacks stop at disposal, while existing awaiters retain the underlying result or error. New mutations and hydration after disposal remain invalid.
+
 ## 7.0.0
 
 ### ⚠️ BREAKING CHANGES

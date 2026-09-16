@@ -57,9 +57,10 @@ import 'state.dart';
 /// });
 /// ```
 ///
-/// <Info>
 ///   If you need to track dependencies across an asynchronous gap (i.e. reading a signal's value *after* an `await`), pass them explicitly in the `dependencies` list inside `AsyncSignalOptions` or the constructor to guarantee they are properly subscribed.
-/// </Info>
+///
+/// Disposing stops reactive publication, not the underlying operation. A future
+/// obtained before disposal still settles with the latest in-flight result.
 /// {@endtemplate}
 class FutureSignal<T> extends AsyncSignal<T> {
   /// {@template future}
@@ -183,9 +184,11 @@ class FutureSignal<T> extends AsyncSignal<T> {
 
   @override
   void dispose() {
+    if (disposed) return;
     super.dispose();
     _cleanup?.call();
     _depCleanup?.call();
+    _computedFuture.dispose();
   }
 
   void _executeFuture(Future<T> future) {
@@ -197,15 +200,27 @@ class FutureSignal<T> extends AsyncSignal<T> {
 
     _currentFuture = future;
 
-    future.then((val) {
-      if (_currentFuture == future) {
-        setValue(val);
-      }
-    }).catchError((Object err, StackTrace stackTrace) {
-      if (_currentFuture == future) {
-        setError(err, stackTrace);
-      }
-    });
+    future.then<void>(
+      (val) {
+        if (_currentFuture != future) return;
+        if (disposed) {
+          if (!completer.isCompleted) completer.complete(val);
+        } else {
+          setValue(val);
+        }
+      },
+      onError: (Object err, StackTrace stackTrace) {
+        if (_currentFuture != future) return;
+        if (disposed) {
+          if (!completer.isCompleted) {
+            completer.future.ignore();
+            completer.completeError(err, stackTrace);
+          }
+        } else {
+          setError(err, stackTrace);
+        }
+      },
+    );
   }
 
   @override
@@ -217,12 +232,14 @@ class FutureSignal<T> extends AsyncSignal<T> {
 
   @override
   void init() {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     super.init();
     _executeFuture(_computedFuture.value);
   }
 
   @override
   AsyncState<T> get value {
+    if (disposed) return internalValue;
     _cleanup ??= _computedFuture.subscribe((future) {
       _executeFuture(future);
     });
@@ -272,7 +289,12 @@ class FutureSignal<T> extends AsyncSignal<T> {
 
   @override
   Future<void> reload() async {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     await super.reload();
+    if (disposed) {
+      await completer.future;
+      return;
+    }
     _currentFuture = null;
     _computedFuture.recompute();
     await future;
@@ -280,7 +302,12 @@ class FutureSignal<T> extends AsyncSignal<T> {
 
   @override
   Future<void> refresh() async {
+    if (disposed) throw SignalsWriteAfterDisposeError(this);
     await super.refresh();
+    if (disposed) {
+      await completer.future;
+      return;
+    }
     _currentFuture = null;
     _computedFuture.recompute();
     await future;

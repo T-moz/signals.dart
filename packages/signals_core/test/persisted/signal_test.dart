@@ -1,8 +1,30 @@
+import 'dart:async';
+
 import 'package:signals_core/signals_core.dart';
 import 'package:test/test.dart';
 
 // A mock store for testing
 class MockStore extends SignalsInMemoryKeyValueStore {}
+
+class DelayedStore extends SignalsInMemoryKeyValueStore {
+  final hydration = Completer<String?>();
+  final writeReady = Completer<void>();
+  final written = Completer<void>();
+  int reads = 0;
+
+  @override
+  Future<String?> getItem(String key) {
+    reads++;
+    return hydration.future;
+  }
+
+  @override
+  Future<void> setItem(String key, String value) async {
+    await writeReady.future;
+    await super.setItem(key, value);
+    written.complete();
+  }
+}
 
 enum TestEnum { a, b, c }
 
@@ -15,6 +37,89 @@ void main() {
   });
 
   group('Persisted Signals', () {
+    test('late hydration settles without replacing disposed state', () async {
+      final delayed = DelayedStore();
+      final signal = PersistedSignal<int>(
+        0,
+        key: 'count',
+        store: delayed,
+        autoInit: false,
+      );
+      final pending = signal.init();
+      signal.dispose();
+      delayed.hydration.complete('42');
+      await pending;
+      expect(signal.value, 0);
+      expect(signal.loaded, true);
+      expect(
+        () => signal.value = 7,
+        throwsA(isA<SignalsWriteAfterDisposeError>()),
+      );
+      expect(delayed.store, isEmpty);
+    });
+
+    test('late hydration preserves the original storage failure', () async {
+      final delayed = DelayedStore();
+      final error = StateError('storage failed');
+      final stack = StackTrace.current;
+      final signal = PersistedSignal<int>(
+        0,
+        key: 'count',
+        store: delayed,
+        autoInit: false,
+      );
+      final pending = signal.init().then<void>(
+        (_) => fail('Expected the original error'),
+        onError: (Object caught, StackTrace trace) {
+          expect(caught, same(error));
+          expect(trace, same(stack));
+        },
+      );
+      signal.dispose();
+      delayed.hydration.completeError(error, stack);
+      await pending;
+      expect(signal.value, 0);
+      expect(signal.loaded, true);
+    });
+
+    test('missing-key hydration does not start another load after disposal',
+        () async {
+      final delayed = DelayedStore();
+      final signal = PersistedSignal<int>(
+        7,
+        key: 'count',
+        store: delayed,
+        autoInit: false,
+      );
+      final pending = signal.init();
+      signal.dispose();
+      expect(signal.value, 7);
+      delayed.hydration.complete(null);
+      await pending;
+      expect(signal.value, 7);
+      expect(delayed.reads, 1);
+      await expectLater(
+        signal.init(),
+        throwsA(isA<SignalsWriteAfterDisposeError>()),
+      );
+      expect(delayed.reads, 1);
+    });
+
+    test('an already-started save persists after disposal', () async {
+      final delayed = DelayedStore();
+      final signal = PersistedSignal<int>(
+        0,
+        key: 'count',
+        store: delayed,
+        autoInit: false,
+      );
+      signal.value = 42;
+      signal.dispose();
+      delayed.writeReady.complete();
+      await delayed.written.future;
+      expect(delayed.store['count'], '42');
+    });
+
     group('PersistedBoolSignal', () {
       test('it should persist a bool value', () async {
         final signal = PersistedBoolSignal(true, 'bool_key');
