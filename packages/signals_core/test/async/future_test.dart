@@ -13,8 +13,11 @@ void main() {
       final pending = s.future;
       final state = s.peek();
       s.dispose();
+      final latePending = s.future;
       operation.complete(42);
       expect(await pending, 42);
+      expect(await latePending, 42);
+      expect(await s.future, 42);
       expect(s.peek(), same(state));
       expect(
         () => s.setValue(7),
@@ -112,6 +115,10 @@ void main() {
       expect(s.peek().isLoading, true);
       expect(s.init, throwsA(isA<SignalsWriteAfterDisposeError>()));
       expect(s.reset, throwsA(isA<SignalsWriteAfterDisposeError>()));
+      await expectLater(
+        s.future,
+        throwsA(isA<SignalsWriteAfterDisposeError>()),
+      );
       await expectLater(
         s.reload(),
         throwsA(isA<SignalsWriteAfterDisposeError>()),

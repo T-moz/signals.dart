@@ -183,6 +183,14 @@ class FutureSignal<T> extends AsyncSignal<T> {
   EffectCleanup? _depCleanup;
 
   @override
+  Future<T> get future {
+    if (disposed && _currentFuture == null && !completer.isCompleted) {
+      return Future<T>.error(SignalsWriteAfterDisposeError(this));
+    }
+    return super.future;
+  }
+
+  @override
   void dispose() {
     if (disposed) return;
     super.dispose();
