@@ -21,5 +21,61 @@ void main() {
 
       expect(getCount(), 1);
     });
+
+    group('toStream', () {
+      test('upstream data updates survive cancelled, disposed computed stream',
+          () async {
+        final source = asyncSignal(AsyncState<int>.data(0));
+        final derived = computed(() => source.value);
+        addTearDown(source.dispose);
+        addTearDown(derived.dispose);
+
+        expect((await derived.toStream().first).requireValue, 0);
+        derived.dispose();
+
+        source.setValue(1);
+        expect(source.requireValue, 1);
+        source.setValue(2);
+        expect(source.requireValue, 2);
+      });
+
+      test('upstream errors survive cancelled, disposed computed stream',
+          () async {
+        final source = asyncSignal(AsyncState<int>.data(0));
+        final derived = computed(() => source.value);
+        addTearDown(source.dispose);
+        addTearDown(derived.dispose);
+
+        expect((await derived.toStream().first).requireValue, 0);
+        derived.dispose();
+
+        source.setError('error');
+        expect(source.value.error, 'error');
+        source.setValue(1);
+        expect(source.requireValue, 1);
+      });
+
+      for (final autoDispose in [false, true]) {
+        test('completes on source disposal with autoDispose=$autoDispose',
+            () async {
+          final source = signal(0);
+          final derived = computed(
+            () => source.value,
+            options: ComputedOptions(autoDispose: autoDispose),
+          );
+          addTearDown(source.dispose);
+          addTearDown(derived.dispose);
+          final events = expectLater(
+            derived.toStream(),
+            emitsInOrder([0, 1, emitsDone]),
+          );
+
+          source.value = 1;
+          derived.dispose();
+
+          await events;
+        });
+      }
+    });
   });
 }
