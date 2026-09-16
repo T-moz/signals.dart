@@ -21,14 +21,11 @@ extension ReadonlySignalUtils<T> on ReadonlySignal<T> {
 
     _streamCache[globalId] = stream;
 
-    void Function()? unsubscribe = subscribe(controller.add);
+    final unsubscribe = subscribe(controller.add);
 
     onDispose(() {
-      final cleanup = unsubscribe;
-      if (cleanup == null) return;
-      unsubscribe = null;
       _streamCache.remove(globalId);
-      cleanup();
+      unsubscribe();
       controller.close();
     });
 

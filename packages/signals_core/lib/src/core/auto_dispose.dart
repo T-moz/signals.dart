@@ -45,9 +45,9 @@ mixin SignalsAutoDisposeMixin<T> on signals.ReadonlySignal<T> {
   /// Dispose the signal
   void dispose() {
     if (_disposed) return;
+    _disposed = true;
     for (final cleanup in _disposeCallbacks) {
       cleanup();
     }
-    _disposed = true;
   }
 }

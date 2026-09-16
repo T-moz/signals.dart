@@ -56,7 +56,7 @@ void main() {
       });
 
       for (final autoDispose in [false, true]) {
-        test('completes on source disposal with autoDispose=$autoDispose',
+        test('disposes once and completes with autoDispose=$autoDispose',
             () async {
           final source = signal(0);
           final derived = computed(
@@ -65,6 +65,8 @@ void main() {
           );
           addTearDown(source.dispose);
           addTearDown(derived.dispose);
+          var cleanups = 0;
+          derived.onDispose(() => cleanups++);
           final events = expectLater(
             derived.toStream(),
             emitsInOrder([0, 1, emitsDone]),
@@ -74,6 +76,7 @@ void main() {
           derived.dispose();
 
           await events;
+          expect(cleanups, 1);
         });
       }
     });
