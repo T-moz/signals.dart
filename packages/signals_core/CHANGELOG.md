@@ -1,9 +1,5 @@
 ## Unreleased
 
-### Fixes
-- `StreamSignal.cancel()` releases producer and dependency observers as well as the stream subscription without disposing the signal's retained state. Reads and dependency changes cannot reconnect a cancelled signal; explicit `reset()`, `reload()` and `refresh()` restore tracking.
-- Reactive stream reads select an updated source before exposing state, preventing a new dependency value from being paired with old stream data. Delayed cancellation and error completion cannot release a newer subscription.
-
 ### 🚀 New Features
 - **MutationSignal (`mutationSignal`)**: A new signal for imperative, on-demand asynchronous side effects (mutations). `MutationSignal<A, T>` wraps a mutation function `Future<T> Function(A)` and exposes `mutate(arg)` (fire-and-forget) and `mutateAsync(arg)` (awaitable), with race protection so only the latest invocation updates the state. Its value is a new sealed `MutationState<T>`: `MutationIdle` (the "not run yet" state on top of the standard lifecycle), `MutationPending`, `MutationSuccess`, and `MutationError`, supporting `map`/`maybeMap` and switch pattern matching. Also exposes `variables`, `future`, and `reset()`.
 - **`mutationSignalContainer`**: A keyed container factory for `MutationSignal`s (mirrors `futureSignalContainer`/`streamSignalContainer`), creating and optionally caching one mutation per key.
