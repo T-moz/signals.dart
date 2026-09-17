@@ -97,7 +97,7 @@ class StreamSignal<T> extends AsyncSignal<T> {
   ///
   /// ## .reset()
   ///
-  /// The `reset` method resets the stream to its initial state to recall on the next evaluation.
+  /// The `reset` method resets the stream to its initial state and starts a fresh subscription, restoring dependency tracking after cancellation.
   ///
   /// ```dart
   /// final stream = (int value) async* {
@@ -186,9 +186,8 @@ class StreamSignal<T> extends AsyncSignal<T> {
   })  : _onDone = options?.onDone ?? onDone,
         cancelOnError = options?.cancelOnError ?? cancelOnError,
         dependencies = options?.dependencies ?? dependencies ?? const [],
-        _stream = computed(
-          () => fn(),
-        ),
+        _factory = fn,
+        _stream = computed(fn),
         super(
           (options?.initialValue ?? initialValue) != null
               ? AsyncState.data((options?.initialValue ?? initialValue) as T)
@@ -202,7 +201,9 @@ class StreamSignal<T> extends AsyncSignal<T> {
     if (!(options?.lazy ?? lazy ?? true)) value;
   }
 
-  final Computed<Stream<T>> _stream;
+  final Stream<T> Function() _factory;
+  Computed<Stream<T>> _stream;
+  Stream<T>? _source;
   bool _fetching = false;
   StreamSubscription<T>? _subscription;
   final void Function()? _onDone;
@@ -213,42 +214,31 @@ class StreamSignal<T> extends AsyncSignal<T> {
   EffectCleanup _listenToDeps() {
     return untracked(() {
       if (dependencies.isEmpty) return () {};
-      final cleanups = <void Function()>[];
-      for (final dep in dependencies) {
-        if (dep is AsyncSignal) {
-          AsyncState? prev;
-          final cleanup = dep.subscribe((val) {
-            final oldPrev = prev;
-            prev = val;
-            if (oldPrev == null) return;
-            if (oldPrev.isLoading && !val.isLoading) {
-              return;
-            }
-            if (oldPrev != val) {
-              reset();
-              execute(_stream.value);
-            }
-          });
-          cleanups.add(cleanup);
-        } else {
-          dynamic prev;
-          final cleanup = dep.subscribe((val) {
-            final oldPrev = prev;
-            prev = val;
-            if (oldPrev == null) return;
-            if (oldPrev != val) {
-              reset();
-              execute(_stream.value);
-            }
-          });
-          cleanups.add(cleanup);
-        }
-      }
+      final cleanups = [
+        for (final dependency in dependencies) _listenToDependency(dependency),
+      ];
       return () {
         for (final c in cleanups) {
           c();
         }
       };
+    });
+  }
+
+  EffectCleanup _listenToDependency(ReadonlySignal<dynamic> dependency) {
+    Object? previous;
+    return dependency.subscribe((value) {
+      final before = previous;
+      previous = value;
+      if (before == null || before == value) return;
+      if (dependency is AsyncSignal &&
+          before is AsyncState &&
+          value is AsyncState &&
+          before.isLoading &&
+          !value.isLoading) {
+        return;
+      }
+      reset();
     });
   }
 
@@ -269,22 +259,99 @@ class StreamSignal<T> extends AsyncSignal<T> {
 
   /// Execute the stream
   Future<void> execute(Stream<T> src) async {
-    if (_done || _fetching) return;
+    if (disposed || _stream.disposed || _done || _fetching) return;
+    final producer = _stream;
+    final source = _source;
     _fetching = true;
-    _subscription = src.listen(
+    final subscription = src.listen(
       setValue,
       onError: setError,
       onDone: _finish,
       cancelOnError: cancelOnError,
     );
+    // listen/onListen can synchronously cancel or restart this signal.
+    if (!identical(producer, _stream) ||
+        producer.disposed ||
+        !identical(source, _source) ||
+        _done ||
+        disposed) {
+      await subscription.cancel();
+    } else {
+      _subscription = subscription;
+    }
+  }
+
+  Future<void>? _stopSubscription() {
+    final subscription = _subscription;
+    _subscription = null;
+    _fetching = false;
+    return subscription?.cancel();
+  }
+
+  void _stopTracking() {
+    final cleanup = _cleanup;
+    final depCleanup = _depCleanup;
+    _cleanup = null;
+    _depCleanup = null;
+    _source = null;
+    // A disposed producer distinguishes explicit cancellation from natural
+    // completion, without disposing the writable AsyncState signal.
+    _stream.dispose();
+    cleanup?.call();
+    depCleanup?.call();
   }
 
   Future<void> _finish() async {
     _done = true;
+    final cancellation = _stopSubscription();
     _onDone?.call();
-    await _subscription?.cancel();
-    _subscription = null;
-    _fetching = false;
+    await cancellation;
+  }
+
+  void _selectSource(Stream<T> src, {bool reset = true}) {
+    if (disposed || _stream.disposed || identical(src, _source)) return;
+    batch(() {
+      _source = src;
+      _stopSubscription();
+      _done = false;
+      if (reset) super.reset();
+      init();
+      execute(src);
+    });
+  }
+
+  void _start({bool reset = true}) {
+    if (_cleanup != null || disposed || _stream.disposed) return;
+    final producer = _stream;
+    // Reserve ownership before callbacks can synchronously read value again.
+    _cleanup = () {};
+    try {
+      _selectSource(producer.peek(), reset: reset);
+      if (producer.disposed || !identical(producer, _stream)) return;
+      final cleanup = producer.subscribe(_selectSource);
+      if (producer.disposed || !identical(producer, _stream)) {
+        cleanup();
+        return;
+      }
+      _cleanup = cleanup;
+      _depCleanup = _listenToDeps();
+    } catch (_) {
+      if (identical(producer, _stream)) _stopTracking();
+      rethrow;
+    }
+  }
+
+  void _restart(void Function() updateState) {
+    batch(() {
+      _stopTracking();
+      _stopSubscription();
+      _done = false;
+      // Keep the old producer disposed during state notifications: a reentrant
+      // read must not initialize a second listener before this restart is ready.
+      updateState();
+      _stream = computed(_factory);
+      _start(reset: false);
+    });
   }
 
   /// Check if the subscription is paused
@@ -302,67 +369,57 @@ class StreamSignal<T> extends AsyncSignal<T> {
     set(value, force: true);
   }
 
-  /// Cancel the subscription
+  /// Cancel the subscription and detach all producer/dependency observers.
+  ///
+  /// The current state remains readable and writable. Ordinary reads and
+  /// dependency changes do not reconnect; [reset], [reload], or [refresh]
+  /// explicitly restart the producer and restore dependency tracking.
   Future<void> cancel() async {
+    _stopTracking();
     await _finish();
   }
 
   @override
   Future<void> reload() async {
-    super.reload();
-    _stream.recompute();
-    _fetching = false;
-    _done = false;
-    _subscription?.cancel();
-    _subscription = null;
-    await execute(_stream.value);
+    _restart(() => super.reload());
   }
 
   @override
   Future<void> refresh() async {
-    super.refresh();
-    _stream.recompute();
-    _fetching = false;
-    _done = false;
-    _subscription?.cancel();
-    _subscription = null;
-    await execute(_stream.value);
+    _restart(() => super.refresh());
   }
 
   @override
   void reset([AsyncState<T>? value]) {
-    super.reset(value);
-    _fetching = false;
-    _done = false;
-    _subscription?.cancel();
-    _subscription = null;
-    init();
+    _restart(() => super.reset(value));
   }
 
   @override
   void dispose() {
+    _stopTracking();
+    _stopSubscription();
     super.dispose();
-    _cleanup?.call();
-    _depCleanup?.call();
-    _subscription?.cancel();
   }
 
   @override
   AsyncState<T> get value {
-    _cleanup ??= _stream.subscribe((src) {
-      reset();
-      execute(src);
-    });
-    _depCleanup ??= _listenToDeps();
+    if (!disposed && !_stream.disposed) {
+      _start();
+      // The producer observer may run after a consumer that also reads the
+      // identity. Pull its latest source before exposing the previous state.
+      if (!_stream.disposed) _selectSource(_stream.peek());
+    }
     return super.value;
   }
 
   @override
   void setError(Object error, [StackTrace? stackTrace]) {
-    super.setError(error, stackTrace);
-    if (cancelOnError == true) {
-      _finish();
-    }
+    batch(() {
+      super.setError(error, stackTrace);
+      if (cancelOnError == true) {
+        _finish();
+      }
+    });
   }
 }
 
@@ -405,7 +462,7 @@ class StreamSignal<T> extends AsyncSignal<T> {
 ///
 /// ## .reset()
 ///
-/// The `reset` method resets the stream to its initial state to recall on the next evaluation.
+/// The `reset` method resets the stream to its initial state and starts a fresh subscription, restoring dependency tracking after cancellation.
 ///
 /// ```dart
 /// final stream = (int value) async* {
